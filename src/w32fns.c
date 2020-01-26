@@ -9884,12 +9884,12 @@ utf8_mbslen_lim (const char *str, int lim)
 
 /* Low-level subroutine to show tray notifications.  All strings are
    supposed to be unibyte UTF-8 encoded by the caller.  */
-static EMACS_INT
+static char *
 add_tray_notification (struct frame *f, const char *icon, const char *tip,
 		       enum NI_Severity severity, unsigned timeout,
 		       const char *title, const char *msg)
 {
-  EMACS_INT retval = EMACS_TRAY_NOTIFICATION_ID;
+  wchar_t retval_w[64];
 
   if (FRAME_W32_P (f))
     {
@@ -9897,8 +9897,12 @@ add_tray_notification (struct frame *f, const char *icon, const char *tip,
       ULONGLONG shell_dll_version = get_dll_version ("Shell32.dll");
       wchar_t tipw[128], msgw[256], titlew[64];
       int tiplen;
+      GUID guid;
 
       memset (&nidw, 0, sizeof(nidw));
+
+	    CoCreateGuid (&guid);
+	    StringFromGUID2 (&guid, retval_w, 64);
 
       /* MSDN says the full struct is supported since Vista, whose
 	 Shell32.dll version is said to be 6.0.6.  But DllGetVersion
@@ -9916,7 +9920,7 @@ add_tray_notification (struct frame *f, const char *icon, const char *tip,
       else
 	nidw.cbSize = MYNOTIFYICONDATAW_V1_SIZE;		/* < W2K */
       nidw.hWnd = FRAME_W32_WINDOW (f);
-      nidw.uID = EMACS_TRAY_NOTIFICATION_ID;
+      nidw.guidItem = guid;
       nidw.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_INFO;
       nidw.uCallbackMessage = EMACS_NOTIFICATION_MSG;
       if (!*icon)
@@ -9930,7 +9934,7 @@ add_tray_notification (struct frame *f, const char *icon, const char *tip,
 	      if (filename_to_utf16 (icon, icon_w) != 0)
 		{
 		  errno = ENOENT;
-		  return -1;
+		  return NULL;
 		}
 	      nidw.hIcon = LoadImageW (NULL, icon_w, IMAGE_ICON, 0, 0,
 				       LR_DEFAULTSIZE | LR_LOADFROMFILE);
@@ -9942,7 +9946,7 @@ add_tray_notification (struct frame *f, const char *icon, const char *tip,
 	      if (filename_to_ansi (icon, icon_a) != 0)
 		{
 		  errno = ENOENT;
-		  return -1;
+		  return NULL;
 		}
 	      nidw.hIcon = LoadImageA (NULL, icon_a, IMAGE_ICON, 0, 0,
 				       LR_DEFAULTSIZE | LR_LOADFROMFILE);
@@ -9959,7 +9963,7 @@ add_tray_notification (struct frame *f, const char *icon, const char *tip,
 	      errno = ENOMEM;
 	      break;
 	    }
-	  return -1;
+	  return NULL;
 	}
 
       /* Windows 9X and NT4 support only 64 characters in the Tip,
@@ -9983,7 +9987,6 @@ add_tray_notification (struct frame *f, const char *icon, const char *tip,
       if (tiplen == 0)
 	{
 	  errno = EINVAL;
-	  retval = -1;
 	  goto done;
 	}
       wcscpy (nidw.szTip, tipw);
@@ -10001,7 +10004,6 @@ add_tray_notification (struct frame *f, const char *icon, const char *tip,
 	  else if (slen == 0)
 	    {
 	      errno = EINVAL;
-	      retval = -1;
 	      goto done;
 	    }
 	  wcscpy (nidw.szInfo, msgw);
@@ -10014,7 +10016,6 @@ add_tray_notification (struct frame *f, const char *icon, const char *tip,
 	  else if (slen == 0)
 	    {
 	      errno = EINVAL;
-	      retval = -1;
 	      goto done;
 	    }
 	  wcscpy (nidw.szInfoTitle, titlew);
@@ -10036,6 +10037,7 @@ add_tray_notification (struct frame *f, const char *icon, const char *tip,
 	      break;
 	    }
 	}
+  nidw.dwInfoFlags = nidw.dwInfoFlags || NIIF_NOSOUND;
 
       if (!Shell_NotifyIconW (NIM_ADD, (PNOTIFYICONDATAW)&nidw))
 	{
@@ -10044,13 +10046,22 @@ add_tray_notification (struct frame *f, const char *icon, const char *tip,
 	  DebPrint (("Shell_NotifyIcon ADD failed (err=%d)\n",
 		     GetLastError ()));
 	  errno = EINVAL;
-	  retval = -1;
+    return NULL;
 	}
     done:
       if (*icon && !DestroyIcon (nidw.hIcon))
 	DebPrint (("DestroyIcon failed (err=%d)\n", GetLastError ()));
+      nidw.uTimeout = 1000;
+    Shell_NotifyIconW(NIM_MODIFY, (PNOTIFYICONDATAW)&nidw);
+    char *retval_a UNINIT;
+    int len = pWideCharToMultiByte (CP_ACP, 0, retval_w, -1, NULL, 0, NULL, NULL);
+	if (len > 32768)
+	  len = 32768;
+	retval_a = alloca (len);
+	pWideCharToMultiByte (CP_ACP, 0, retval_w, -1, retval_a, len, NULL, NULL);
+  return retval_a;
     }
-  return retval;
+  return NULL;
 }
 
 /* Low-level subroutine to remove a tray notification.  Note: we only
@@ -10148,7 +10159,7 @@ usage: (w32-notification-notify &rest PARAMS)  */)
 {
   struct frame *f = SELECTED_FRAME ();
   Lisp_Object arg_plist, lres;
-  EMACS_INT retval;
+  char* retval;
   char *icon, *tip, *title, *msg;
   enum NI_Severity severity;
   unsigned timeout = 0;
@@ -10201,7 +10212,7 @@ usage: (w32-notification-notify &rest PARAMS)  */)
 
   /* Do it!  */
   retval = add_tray_notification (f, icon, tip, severity, timeout, title, msg);
-  return (retval < 0 ? Qnil : make_fixnum (retval));
+  return (retval != NULL ? build_string(retval) : Qnil);
 }
 
 DEFUN ("w32-notification-close",
